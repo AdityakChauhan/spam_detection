@@ -33,7 +33,6 @@ def preprocess_github_spam() -> None:
     except Exception as e:
         print(f"Error processing GitHub spam dataset: {e}")
 
-# If you want to run just this preprocessing
 if __name__ == "__main__":
     preprocess_github_spam()
     
