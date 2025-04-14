@@ -5,9 +5,8 @@ from datasets import Dataset
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import matplotlib.pyplot as plt
 import numpy as np
-import time
-import matplotlib
-matplotlib.use('TkAgg')
+import seaborn as sns
+from torch.utils.data import DataLoader
 
 
 # Set device
@@ -92,7 +91,6 @@ class LivePlotCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
         step = state.global_step
         loss = logs.get("loss", None)
-        print(f"[DEBUG] Step: {step}, Loss: {loss}")
 
         if loss is not None:
             self.steps.append(step)
@@ -107,6 +105,49 @@ class LivePlotCallback(TrainerCallback):
         plt.ioff()
         plt.show()
 
+def clean_prediction(p):
+    p = p.strip().lower()
+    if '1' in p:
+        return '1'
+    elif '0' in p:
+        return '0'
+    elif 'spam' in p:
+        return '1'
+    elif 'ham' in p:
+        return '0'
+    else:
+        return '0'  # Default to ham for junk like "Subject"
+
+def generate_predictions(model, tokenizer, eval_ds):
+    collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+    dataloader = DataLoader(eval_ds, batch_size=4, collate_fn=collator)
+
+    preds = []
+    labels = []
+
+    model.eval()
+    with torch.no_grad():
+        for batch in dataloader:
+            input_ids = batch["input_ids"].to(model.device)
+            attention_mask = batch["attention_mask"].to(model.device)
+            label_ids = batch["labels"]
+            label_ids[label_ids == -100] = tokenizer.pad_token_id
+
+            # Generate outputs
+            outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=10)
+
+            # Decode predictions and labels
+            preds.extend(tokenizer.batch_decode(outputs, skip_special_tokens=True))
+            labels.extend(tokenizer.batch_decode(label_ids, skip_special_tokens=True))
+    print(preds[0:14])
+    print(labels[0:14])
+    preds = [clean_prediction(p) for p in preds]
+    labels = [clean_prediction(l) for l in labels]
+            
+    print(preds[0:14])
+    print(labels[0:14])
+
+    return preds, labels
 
 
 # === Main training function ===
@@ -149,7 +190,7 @@ def train_and_evaluate(csv_path, model_name="google/flan-t5-small", epochs=3, ba
         eval_dataset=eval_ds,
         tokenizer=tokenizer,
         data_collator=DataCollatorForSeq2Seq(tokenizer, model=model),
-        compute_metrics=lambda eval_pred: compute_metrics(eval_pred, tokenizer),
+        compute_metrics=compute_metrics,
         callbacks=[LivePlotCallback],
     )
 
@@ -162,28 +203,41 @@ def train_and_evaluate(csv_path, model_name="google/flan-t5-small", epochs=3, ba
     print("✅ Training completed.\n")
 
     print("🧪 Evaluating...")
-    eval_output = trainer.predict(eval_ds)
-
-    decoded_preds = tokenizer.batch_decode(eval_output.predictions, skip_special_tokens=True)
-    decoded_labels = tokenizer.batch_decode(eval_output.label_ids, skip_special_tokens=True)
-
+    decoded_preds, decoded_labels = generate_predictions(model, tokenizer, eval_ds)
+    
+    # Strip whitespace and lowercase for consistency
+    decoded_preds = [p.strip().lower() for p in decoded_preds]
+    decoded_labels = [l.strip().lower() for l in decoded_labels]
+    
+    # ✅ Now compute metrics
     acc = accuracy_score(decoded_labels, decoded_preds)
-    prec = precision_score(decoded_labels, decoded_preds, pos_label="spam", average="binary")
-    rec = recall_score(decoded_labels, decoded_preds, pos_label="spam", average="binary")
-    f1 = f1_score(decoded_labels, decoded_preds, pos_label="spam", average="binary")
-    cm = confusion_matrix(decoded_labels, decoded_preds, labels=["ham", "spam"])
-
+    prec = precision_score(decoded_labels, decoded_preds, pos_label="1", average="binary")
+    rec = recall_score(decoded_labels, decoded_preds, pos_label="1", average="binary")
+    f1 = f1_score(decoded_labels, decoded_preds, pos_label="1", average="binary")
+    cm = confusion_matrix(decoded_labels, decoded_preds, labels=["0", "1"])
+    cm_df = pd.DataFrame(cm, index=["Actual Ham", "Actual Spam"], columns=["Predicted Ham", "Predicted Spam"])
+    
     print("\n📊 Final Evaluation Metrics:")
     print(f"  Accuracy :  {acc:.4f}")
     print(f"  Precision:  {prec:.4f}")
     print(f"  Recall   :  {rec:.4f}")
     print(f"  F1 Score :  {f1:.4f}")
-    print("\n🧩 Confusion Matrix:\n", cm)
+    print("\n🧩 Confusion Matrix:\n", cm_df)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues", cbar=False, linewidths=1, linecolor='black')
+    plt.title("📊 Confusion Matrix")
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+    plt.tight_layout()
+    plt.savefig('confusion_matrix.png')
+    plt.show()
+    torch.save(model.state_dict(), "Flan_T5_trained.pt")
+    print("Model saved as 'Flan_T5_trained.pt'")
 
 
 # === Example usage ===
 if __name__ == "__main__":
     # Make sure your CSV has two columns: 'text' and 'label' (label: 0 for ham, 1 for spam)
     
-    csv_path = ".\data.csv"
-    train_and_evaluate(csv_path, epochs=1, batch_size=12)
+    csv_path = "D:\spam_detection\Flan-T5\data.csv"
+    train_and_evaluate(csv_path, epochs=2, batch_size=4)
